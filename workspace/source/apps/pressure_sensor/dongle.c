@@ -48,7 +48,12 @@
 
 #define DONGLE_ADDR   LIGHT_ADDR
 #define ROBOT_ADDR    SWITCH_ADDR
-
+enum{
+  INITIAL,
+  SENDING,
+  WAITING,
+  READY
+}states;
 /***********************************************************************************
 * LOCAL VARIABLES
 */
@@ -57,6 +62,10 @@ static uint8 pTxData[APP_PAYLOAD_LENGTH];
 static uint8 pRxData[APP_PAYLOAD_LENGTH];
 static basicRfCfg_t basicRfConfig;
 int start = 0;
+uint8 readCoefficients = 0;
+uint8 bob;
+int initSuccess;//boolean
+
 
 #ifdef SECURITY_CCM
 // Security key
@@ -73,11 +82,11 @@ static uint8 key[]= {
 //static void appSwitch();
 
 static void basicRfSetUp();
-static void initRobotComm();
+static int initRobotComm();
 static void receiveCoefficients();
 void uartStartRxForIsr();
+void configureUSART0forUART_ALT1();
 
-uint8 bob;
 
 
 /***********************************************************************************
@@ -98,13 +107,27 @@ void main(void)
   halLedSet(1);
   halMcuWaitMs(350);
   
-  // uartStartRxForIsr();
-  // while(!start); //waiting for 'a' key from PC 
+ configureUSART0forUART_ALT1();
+  uartStartRxForIsr();
+
+   while(!start); //waiting for 'a' key from PC 
+   
+   //respond to PC -- going to try to start up WRS 
+ 
+  initSuccess=initRobotComm();//return true if uC1 and uC2 com init success
+ //tell PC WRS is on and communicating
   
-  initRobotComm();
+ if(initSuccess)
+ {
+   //repond to PC we're all good to go
+ }
+ else
+ {
+   //tell PC we suck
+ }
   
+  //Initialization Complete
   
-  //receiveCoefficients();
   //receiveContinuousData();
   
 }
@@ -115,7 +138,7 @@ void main(void)
 //-------------------------------------------------
 //toggles led if acknowledgement received 
 
-static void initRobotComm(){
+static int initRobotComm(){
   
   pTxData[0] = INIT_COMM_CMD;
   
@@ -130,6 +153,7 @@ static void initRobotComm(){
   if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
     if(pRxData[0] == ACK) {
       halLedToggle(1);//WRS received command 
+      return 1;
     }   
   }
   
@@ -170,6 +194,28 @@ static void receiveCoefficients(){
   
   basicRfReceiveOff();
 }
+//-------------------------------------------
+//      CONFIGURE USART
+//-------------------------------------------
+
+void configureUSART0forUART_ALT1(){   
+  PERCFG &= ~0X01; //SET USART0 TO ALT LOCATION 1 - FAMILY PG. 85
+  P0SEL  |=  0x0C; //SET RX(bit2) and TX(bit3) to PERIPHERAL FUNCTION [---- 11--] - FAMILY PG. 85
+  P0DIR  |=  0x08; //SET TX(bit3) TO OUTPUT(1) [---- 1---] - FAMILY PG.86
+  P0DIR  &= ~0X04; //SET RX(bit2) TO INPUT(0) [---- -0--] - FAMILY PG.86
+  
+  U0CSR  |=  0x80; //SET USART0 TO UART MODE -FAMILY PG.160
+  
+  // set stop/start bit levels parity, number of stop bits etc...
+  U0UCR |=  0x06;//Flow control disabled, 8bit transfer, Parity diabled, 2 stop bits, high stop bit, low start bit[-0-0 0110]
+  U0UCR &= ~0x59;
+  
+  // Chose 28800 baud rate... because it seemed like a good number
+  U0BAUD =  0xD8; //SET BAUD_M = 216(0xD8) - Family pdf pg159 
+  U0GCR |=  0x09; //SET U0GCR.BAUD_E = 9 => Set 0 and 3 bit to 1 [---0 1001]
+  U0GCR &= ~0x16; //                        and bits 1,2, and 4 to 0.    
+}
+
 
 //-------------------------------------------
 //      Turn on RX
@@ -196,6 +242,9 @@ _Pragma("vector=0x13") __near_func __interrupt void UART0_RX_ISR(void)
   {
   case 97:// 'a' key
     start = 1;//Start communication with WRS
+    break;
+  case 107:
+    readCoefficients=1;//start reading coeffs from pressure sensor
     break;
   }
   IEN0 |= 0x80; //ENABLE INTERRUPTS GENERALLY

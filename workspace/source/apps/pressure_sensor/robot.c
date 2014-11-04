@@ -77,6 +77,16 @@
 #define Padc_LSB 0x82
 #define Tadc_MSB 0x84
 #define Tadc_LSB 0x86
+#define START 0x24
+
+enum{
+  
+  INITIAL,
+  SENDING,
+  WAITING,
+  READY
+    
+}states;
 
 
 /***********************************************************************************
@@ -93,6 +103,10 @@ int a0;
 int b1;
 int b2;
 int c12;
+double a0dec;
+double b1dec;
+double b2dec;
+double c12dec;
 int value; // Value in which ADC conversion is stored.
 int counter = 0;
 
@@ -157,8 +171,10 @@ void main(void)
   // CONFIGURE TIMER 1
   //-----------------------------------------------------
   PERCFG &= ~0x40; //[-0-- ----]  (TIMER 1 ALT 1)
-  P0SEL |= 0x18; //[---1 1---] (CH 1 and CH 2 to peripheral)
-  P1DIR |= 0x18; //[---1 1---] (CH1 and CH2 to output)
+  P0SEL |= 0x10; //[---1 1---] (CH 1 and CH 2 to peripheral)
+  P0DIR |= 0x10; //[---1 1---] (CH1 and CH2 to output)
+  P0SEL |= 0x08;
+  P0DIR |= 0x08;
   //------------------------
   // CONFIGURE 800Hz Timer
   //------------------------
@@ -167,25 +183,35 @@ void main(void)
   T1CTL &= ~0x04; //[---- -0--]
   //T1CC0 = 625. Need 800hz trigger frq => (1MHZ timer/count)=800 => count = 1250.
   //In up-down mode, the timer counts up to a number, then counts down to zero to trigger interrupt.
-  //We want the high number to be 1250/2 => 650.
-  T1CC0H = 0x02;  
+  //We want the high number to be 1250/2 => 650. 
   T1CC0L = 0x71;
+  T1CC0H = 0x02; 
   //------------------------
   // Set-up PWM
   //------------------------
+  //Test PWM.  CH1 MAX, CH2 MIN
+  T1CC1H = 0x00;
+  T1CC1L = 0x64;
+  T1CC2H = 0x00;
+  T1CC2L = 0x64;
   //Set each channel to set-up, clear-down and compare mode
   T1CCTL1 |= 0x1C;  //[---1 11--]
-  T1CCTL1 &= ~0x23;  //[--0- --00]
+  T1CCTL1 &= ~0x63;  //[--0- --00]
   T1CCTL2 |= 0x1C;  //[---1 11--]
-  T1CCTL2 &= ~0x23;  //[--0- --00]
-  IEN0 |= 0x80; //[1--- ----] Allow interrupts
-  IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt
+  T1CCTL2 &= ~0x63;  //[-00- --00]
+//  IEN0 |= 0x80; //[1--- ----] Allow interrupts
+//  IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt
     
+//  //To Test Timer (5Hz)
+  P0SEL &= ~0x01;
+  P0DIR |= 0x01;
+  
 
   
-  
 
-  //configurePressure();
+  configurePressure();
+  //Send coefficients to dongle/PC
+  readPressure();
   //-------------------------------------------------------------------------
   // RF STUFF
   //-------------------------------------------------------------------------
@@ -307,35 +333,81 @@ static void configurePressure()
   
   CS = 0;
   
-  //for(int i=0; i<9; i++)
-  int i = 0;
-  while(i<9)
+  for(int i=0; i<9; i++)
   {
     
     U1TX_BYTE = 0;
-    U1DBUF = spiTxBuffer[i];//(a0_MSB + 2*i);
+    U1DBUF = spiTxBuffer[i];
     while(!U1TX_BYTE);    
-    
-    spiRxBuffer[i*2] = U1DBUF;
-    //spiRxBuffer[i] = U1DBUF;
-    
-    U1TX_BYTE = 0; //NOT SURE IF THIS IS NEEDED OR NOT
+ 
+    U1TX_BYTE = 0; 
     U1DBUF = 0x00;
     while (!U1TX_BYTE);    
-    spiRxBuffer[i*2+1] = U1DBUF;
-    
-    i++;
-    //i = i%9;
-    
+    spiRxBuffer[i] = U1DBUF;
     
   }
+  
   CS = 1;
   
   a0 = (spiRxBuffer[0]<<8) + spiRxBuffer[1];
+  a0dec=(double)a0/8;
   b1 = (spiRxBuffer[2]<<8) + spiRxBuffer[3];
+  b1dec=(double)b1/8192;
   b2 = (spiRxBuffer[4]<<8) + spiRxBuffer[5];
+  b2dec = (double)b2/16384;
+  //NOT CORRECT (C12)
   c12 = (spiRxBuffer[6]<<8) + spiRxBuffer[7];
+  c12dec = (double)c12/16777216;
+  //Do math on these or send them as is...
+ 
+  CS=0;
+  //Start Measuring Pressure
+  U1TX_BYTE = 0;
+  U1DBUF = START;
+  while(!U1TX_BYTE);    
+ 
+  U1TX_BYTE = 0; 
+  U1DBUF = 0x00;
+  while (!U1TX_BYTE);    
+  CS=1;
 }
+
+//-----------------------------------------
+// READ PRESSURE AND TEMPERATURE
+//-----------------------------------------
+static void readPressure()
+{
+  CS = 1;
+  //Set VDD high, GND low, SDN low
+  P1_1=1; //VDD
+  P1_2=0; //GND
+  P1_3=1; //SDN
+  
+  //Read coefficients
+  spiTxBuffer[0] = Padc_MSB;
+  spiTxBuffer[1] = Padc_LSB;
+  spiTxBuffer[2] = Tadc_MSB;
+  spiTxBuffer[3] = Tadc_LSB;
+  spiTxBuffer[4] = 0x00;
+  CS = 0;
+  
+  for(int i=0; i<5; i++)
+  {
+    
+    U1TX_BYTE = 0;
+    U1DBUF = spiTxBuffer[i];
+    while(!U1TX_BYTE);    
+
+    U1TX_BYTE = 0; 
+    U1DBUF = 0x00;
+    while (!U1TX_BYTE);    
+    spiRxBuffer[i] = U1DBUF;
+ 
+  }
+  CS = 1;
+
+}
+
 
 //-----------------------------------------
 // TIMER INTERRUPT
