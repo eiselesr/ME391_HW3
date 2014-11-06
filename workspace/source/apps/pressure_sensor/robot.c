@@ -1,6 +1,6 @@
 /***********************************************************************************
 
-      WIRELESS ROBOTIC SYSTEM FILE --- LOAD ONTO CC2530 RFB 743
+WIRELESS ROBOTIC SYSTEM FILE --- LOAD ONTO CC2530 RFB 743
 
 ***********************************************************************************/
 
@@ -44,6 +44,7 @@
 #define LIGHT_TOGGLE_CMD          0
 
 #define INIT_COMM_CMD 1
+#define INIT_CONTDATA_CMD 2
 #define ACK 23
 
 // Application states
@@ -92,10 +93,13 @@ enum{
 /***********************************************************************************
 * LOCAL VARIABLES
 */
-unsigned char spiTxBuffer[10];
-unsigned char spiRxBuffer[20];  
+unsigned char spiTxBuffer[APP_PAYLOAD_LENGTH];//10
+unsigned char spiRxBuffer[APP_PAYLOAD_LENGTH];  //20
 static uint8 pTxData[APP_PAYLOAD_LENGTH];
 static uint8 pRxData[APP_PAYLOAD_LENGTH];
+static uint8 coeffBuf[APP_PAYLOAD_LENGTH];
+
+uint8 status;
 
 static basicRfCfg_t basicRfConfig;
 
@@ -109,6 +113,11 @@ double b2dec;
 double c12dec;
 int value; // Value in which ADC conversion is stored.
 int counter = 0;
+int spiPkg;
+int adcPkg;
+int dongleActive = 0;
+int state = 0;
+int sendPacket = 0;
 
 
 /***********************************************************************************
@@ -119,6 +128,8 @@ static void appADC();
 static void basicRfSetUp();
 static void configurePressure();
 static void readPressure();
+uint8 sendPressure();
+
 _Pragma("vector=0x4B") __near_func __interrupt void LIGHTUP(void);
 
 
@@ -139,7 +150,7 @@ void main(void)
   P0DIR &= ~0xE0;//SET P0_7, 6, 5 to input [000-  ----]
   APCFG |= 0xE0;// Analog Peripheral I/O enable [111- ----] pg.85, 134  
   
-//--------------------------------------------------------------------------
+  //--------------------------------------------------------------------------
   // CONFIGURE SPI (USART 1 ALT 2)
   //--------------------------------------------------------------------------
   PERCFG |= 0x02; //SET USART 1 I/O location TO ALTERNATIVE 2 => set bit 1 to 1: [---- --1-] - Family pg. 85
@@ -199,55 +210,103 @@ void main(void)
   T1CCTL1 &= ~0x63;  //[--0- --00]
   T1CCTL2 |= 0x1C;  //[---1 11--]
   T1CCTL2 &= ~0x63;  //[-00- --00]
-//  IEN0 |= 0x80; //[1--- ----] Allow interrupts
-//  IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt
-    
-//  //To Test Timer (5Hz)
+  //  IEN0 |= 0x80; //[1--- ----] Allow interrupts
+  //  IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt
+  
+  //  //To Test Timer (5Hz)
   P0SEL &= ~0x01;
   P0DIR |= 0x01;
   
-
   
-
-  configurePressure();
-  //Send coefficients to dongle/PC
-  readPressure();
   //-------------------------------------------------------------------------
   // RF STUFF
   //-------------------------------------------------------------------------
   basicRfSetUp();
   
   // Initalise board peripherals
-  halBoardInit();
-  halJoystickInit();
-  
+  // halBoardInit();  
   
   if(halRfInit()==FAILED) {
     HAL_ASSERT(FALSE);
   }
   
-  halMcuWaitMs(350);  
+  halMcuWaitMs(350);  //Why are we waiting here?
   
   //begins waiting for msg
+  configurePressure();
+  //sendPressure Coefficients
+  //status = basicRfSendPacket(DONGLE_ADDR, spiRxBuffer, 105);
+  //Wait for Handshake
+  
   
   while(TRUE){
-    basicRfReceiveOn();
-    while(!basicRfPacketIsReady());
+    // 
     
-    if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
-      if(pRxData[0] == INIT_COMM_CMD) {
-        
-        //turn receive off -- send ack to dongle
-        basicRfReceiveOff();
-        pTxData[0] = ACK;  //Read as 0x17 (23)
-        pTxData[1] = 0x14; //These mean nothing... Just cool that it works =)
-        pTxData[2]=0x15;
-        basicRfSendPacket(DONGLE_ADDR, pTxData, 105);
+    switch(state)
+    {
+      //uninitialized
+    case 0: 
+      basicRfReceiveOn();
+      while(!basicRfPacketIsReady());
+      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+        if(pRxData[0] == INIT_COMM_CMD) {        
+//          //turn receive off -- send ack to dongle
+//          basicRfReceiveOff();
+//          pTxData[0] = ACK;  //Read as 0x17 (23)
+//          pTxData[1] = 0x14; //These mean nothing... Just cool that it works =)
+//          pTxData[2]=0x15;
+//          basicRfSendPacket(DONGLE_ADDR, pTxData, 105);
+//          basicRfReceiveOn();
+          state = 1; //Ready State
+        }
       }
+      break;
+    case 1:
+      while(!basicRfPacketIsReady());
+      
+      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+        if(pRxData[0] == INIT_CONTDATA_CMD){
+          state = 2;
+          configurePressure();// populates spiTxBuffer
+          basicRfSendPacket(DONGLE_ADDR, coeffBuf, 105);
+          //IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt <- Probably won't use
+        }
+        //if UP
+        //if DOWN
+        //if LEFT
+        //if RIGHT
+      }      
+      break;
+      
+    case 2:
+      while(!basicRfPacketIsReady() && (sendPacket==0));
+      if(basicRfPacketIsReady())
+      {
+        if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+          //if UP
+          //if DOWN
+          //if LEFT
+          //if RIGHT
+        }
+      }
+      if(sendPacket ==1)
+      {
+        readPressure();
+        if(sendPressure()==FAILED){
+          state = 1;//Send pressure, go back to ready state if fail to send
+          //IEN1 &= ~0x02; //[---- --1-] Disable Timer 1 interrupt <- Probably won't use
+        }
+        sendPacket = 0;
+      }
+      break; 
     }
+    
+    //
+    
   }
+  
 }
-  // appADC();
+// appADC();
 //----------------------------------
 //
 //    SEND ADC VALUES 
@@ -259,16 +318,16 @@ static void appADC()
   basicRfReceiveOn();
   
   //  //----------------------------
-//  // Start conversion
-//  //----------------------------
-//  ADCCON3 = ADC_10_BIT | ADC_AIN5; //Use internal voltage reference at 256 decimation rate(10bit)[0010 ----]
-//  while(!(ADCCON1 & 0x80)); //WAIT UNTIL END OF CONVERSION
-//  //----------------------------
-//  // READ conversion
-//  //----------------------------
-//  value = ADCL; //ADCL is the ADC low bits
-//  value |= (((unsigned int)ADCH) << 8); //ADCH is ADC high bits
-//  //wait after sending this value 
+  //  // Start conversion
+  //  //----------------------------
+  //  ADCCON3 = ADC_10_BIT | ADC_AIN5; //Use internal voltage reference at 256 decimation rate(10bit)[0010 ----]
+  //  while(!(ADCCON1 & 0x80)); //WAIT UNTIL END OF CONVERSION
+  //  //----------------------------
+  //  // READ conversion
+  //  //----------------------------
+  //  value = ADCL; //ADCL is the ADC low bits
+  //  value |= (((unsigned int)ADCH) << 8); //ADCH is ADC high bits
+  //  //wait after sending this value 
   
   while (TRUE) {
     //wait until this is true 
@@ -276,14 +335,14 @@ static void appADC()
     
     if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
       //turn receive off -- send adc info to dongle
-        basicRfReceiveOff();
-        pTxData[0] = value;
-        basicRfSendPacket(DONGLE_ADDR, pTxData, 105);
-        
-      }
+      basicRfReceiveOff();
+      pTxData[0] = value;
+      basicRfSendPacket(DONGLE_ADDR, pTxData, 105);
+      
     }
+  }
 }
- //-----------------------------------------
+//-----------------------------------------
 // CONFIGURE AND INITIALIZE BASIC RF 
 //
 //--------------------------------------------
@@ -332,44 +391,31 @@ static void configurePressure()
   spiTxBuffer[8] = 0x00;
   
   CS = 0;
-  
+  coeffBuf[0] = 'C'; //Coefficient header
+  coeffBuf[1] = 0; //Packet Number
+  coeffBuf[2] = 1; //Packet Number
   for(int i=0; i<9; i++)
   {
     
     U1TX_BYTE = 0;
     U1DBUF = spiTxBuffer[i];
     while(!U1TX_BYTE);    
- 
+    
     U1TX_BYTE = 0; 
     U1DBUF = 0x00;
     while (!U1TX_BYTE);    
-    spiRxBuffer[i] = U1DBUF;
-    
-  }
-  
+    coeffBuf[i+3] = U1DBUF;    
+  }  
   CS = 1;
   
-  a0 = (spiRxBuffer[0]<<8) + spiRxBuffer[1];
-  a0dec=(double)a0/8;
-  b1 = (spiRxBuffer[2]<<8) + spiRxBuffer[3];
-  b1dec=(double)b1/8192;
-  b2 = (spiRxBuffer[4]<<8) + spiRxBuffer[5];
-  b2dec = (double)b2/16384;
-  //NOT CORRECT (C12)
-  c12 = (spiRxBuffer[6]<<8) + spiRxBuffer[7];
-  c12dec = (double)c12/16777216;
-  //Do math on these or send them as is...
- 
-  CS=0;
-  //Start Measuring Pressure
-  U1TX_BYTE = 0;
-  U1DBUF = START;
-  while(!U1TX_BYTE);    
- 
-  U1TX_BYTE = 0; 
-  U1DBUF = 0x00;
-  while (!U1TX_BYTE);    
-  CS=1;
+  //a0 = (spiRxBuffer[0]<<8) + spiRxBuffer[1];
+  //b1 = (spiRxBuffer[2]<<8) + spiRxBuffer[3];
+  //b2 = (spiRxBuffer[4]<<8) + spiRxBuffer[5];
+  //c12 = (spiRxBuffer[6]<<8) + spiRxBuffer[7];
+  //a0dec=(double)a0/8;
+  //b1dec=(double)b1/8192;
+  //b2dec = (double)b2/16384;
+  //c12dec = (double)c12/16777216;  
 }
 
 //-----------------------------------------
@@ -383,31 +429,69 @@ static void readPressure()
   P1_2=0; //GND
   P1_3=1; //SDN
   
+  
+  CS=0;
+  //Start Measuring Pressure
+  U1TX_BYTE = 0;
+  U1DBUF = START;
+  while(!U1TX_BYTE);    
+  
+  U1TX_BYTE = 0; 
+  U1DBUF = 0x00;
+  while (!U1TX_BYTE);    
+  CS=1;
+  
+  halMcuWaitMs(3);//Wait for conversion
+  
   //Read coefficients
   spiTxBuffer[0] = Padc_MSB;
   spiTxBuffer[1] = Padc_LSB;
   spiTxBuffer[2] = Tadc_MSB;
   spiTxBuffer[3] = Tadc_LSB;
   spiTxBuffer[4] = 0x00;
-  CS = 0;
   
+  CS = 0;
   for(int i=0; i<5; i++)
   {
     
     U1TX_BYTE = 0;
     U1DBUF = spiTxBuffer[i];
     while(!U1TX_BYTE);    
-
+    
     U1TX_BYTE = 0; 
     U1DBUF = 0x00;
     while (!U1TX_BYTE);    
     spiRxBuffer[i] = U1DBUF;
- 
+    
   }
   CS = 1;
-
+  
 }
-
+//-----------------------------------------
+// Send PRESSURE AND TEMPERATURE
+//-----------------------------------------
+uint8 sendPressure()
+{  
+  uint8 status = FAILED;// FAILED = 1
+  int i = 0;
+  while(i<5)
+  {
+    pTxData[0] = 'P'; //P => Pressure data
+    pTxData[1] = spiPkg/8;
+    pTxData[2] = spiPkg%8;
+    pTxData[3] = spiTxBuffer[0];
+    pTxData[4] = spiTxBuffer[1];
+    pTxData[5] = spiTxBuffer[2];
+    pTxData[6] = spiTxBuffer[3];
+    status = basicRfSendPacket(DONGLE_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+    spiPkg++;
+    i++;
+    if(status == SUCCESS){
+      break;
+    }
+  }
+  return status;  
+}
 
 //-----------------------------------------
 // TIMER INTERRUPT
@@ -420,6 +504,7 @@ _Pragma("vector=0x4B") __near_func __interrupt void LIGHTUP(void)
   if(counter>=160){
     P0_0 = !P0_0; //LED1
     counter=0;
+    sendPacket = 1;
   }
 }
 
@@ -529,12 +614,12 @@ counter = counter+1;
 if(counter>=freqcount){
 P1_0 = (P1_0 == 0); //LED1
 counter=0;
-  }
+}
 
 if(timerrunning)//timer has started
 {
 timercount+=1;//Increment timercount by 1 (representing 1ms)
-  }
+}
 }
 */
 

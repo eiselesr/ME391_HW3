@@ -1,7 +1,7 @@
 /***********************************************************************************
 
 
-    DONGLE FILE --- LOAD ONTO CC2530 RFB 525
+DONGLE FILE --- LOAD ONTO CC2530 RFB 525
 
 ***********************************************************************************/
 
@@ -40,6 +40,8 @@
 #define LIGHT_TOGGLE_CMD          0
 
 #define INIT_COMM_CMD 1
+#define INIT_COEF_CMD 2
+#define INIT_CONTDATA_CMD 3
 #define ACK         23
 
 // Application states
@@ -64,8 +66,9 @@ static basicRfCfg_t basicRfConfig;
 int start = 0;
 uint8 readCoefficients = 0;
 uint8 bob;
-int initSuccess;//boolean
-
+uint8 status = 0;//boolean
+int receiveData=0;
+int state = 0;
 
 #ifdef SECURITY_CCM
 // Security key
@@ -83,7 +86,8 @@ static uint8 key[]= {
 
 static void basicRfSetUp();
 static int initRobotComm();
-static void receiveCoefficients();
+static int receiveCoefficients();
+static void receiveContinuousData();
 void uartStartRxForIsr();
 void configureUSART0forUART_ALT1();
 
@@ -107,58 +111,59 @@ void main(void)
   halLedSet(1);
   halMcuWaitMs(350);
   
- configureUSART0forUART_ALT1();
+  configureUSART0forUART_ALT1();
   uartStartRxForIsr();
-
-   while(!start); //waiting for 'a' key from PC 
-   
-   //respond to PC -- going to try to start up WRS 
- 
-  initSuccess=initRobotComm();//return true if uC1 and uC2 com init success
- //tell PC WRS is on and communicating
   
- if(initSuccess)
- {
-   //repond to PC we're all good to go
- }
- else
- {
-   //tell PC we suck
- }
+  //while(!start); //waiting for 'a' key from PC 
+  //respond to PC -- going to try to start up WRS 
   
-  //Initialization Complete
-  
-  //receiveContinuousData();
-  
+  //Main Overall Loop
+  while(TRUE){
+    
+    switch (state)
+    {
+      
+    case 0: //Startup and send initialization command to Robot
+      pTxData[0] = INIT_COMM_CMD;
+      
+      basicRfReceiveOff();
+      
+      status=basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+      if(status==SUCCESS){
+        state=1;
+      }
+      
+      basicRfReceiveOn();
+      break;
+      
+    case 1: //Request Coefficients
+      pTxData[0] = INIT_COEF_CMD;
+      
+      basicRfReceiveOff();
+      
+      status=basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+      if(status==SUCCESS){
+        state=2;
+        if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH,NULL)>0) {
+          if(pRxData[0] == 'C') {
+            halLedToggle(1);//WRS received command 
+            
+            //Pass pRxData to PC    
+          } 
+        }
+      }
+      
+      basicRfReceiveOn();
+      break;
+      
+    case 2:
+      
+      break;
+      
+    }
+  }
 }
 
-
-//-------------------------------------------------
-//      Initialize Wireless Robotic System Comm
-//-------------------------------------------------
-//toggles led if acknowledgement received 
-
-static int initRobotComm(){
-  
-  pTxData[0] = INIT_COMM_CMD;
-  
-  basicRfReceiveOff();
-  
-  basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
-  
-  basicRfReceiveOn();
-  
-  while(!basicRfPacketIsReady());//wait to receive acknowledgement
-  
-  if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
-    if(pRxData[0] == ACK) {
-      halLedToggle(1);//WRS received command 
-      return 1;
-    }   
-  }
-  
-  
-}  
 
 //-------------------------------------------
 //      Set Up Basic RF
@@ -184,16 +189,33 @@ static void basicRfSetUp()
   }
 }
 
-
-static void receiveCoefficients(){
+//-------------------------------------------
+//      Receive Continuous Data
+//-------------------------------------------
+static void receiveContinuousData(){
   
-  basicRfReceiveOn();
-  while(!basicRfPacketIsReady());
-  
-  if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH,NULL)>0);
+  pTxData[0] = INIT_CONTDATA_CMD;
   
   basicRfReceiveOff();
+  
+  basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+  
+  basicRfReceiveOn();
+  
+  while(!basicRfPacketIsReady());//wait to receive acknowledgement
+  
+  if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+    if(pRxData[0] == 'C') {
+      halLedToggle(1);//WRS received command 
+      
+    }    
+  }
+  //Ready to collect data
+  
+  
 }
+
+
 //-------------------------------------------
 //      CONFIGURE USART
 //-------------------------------------------
