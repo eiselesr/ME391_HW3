@@ -138,22 +138,22 @@ void main(void)
       
     case 1: //Request Coefficients
       pTxData[0] = INIT_COEF_CMD;
-      
       basicRfReceiveOff();
       
       status=basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+      
+      basicRfReceiveOn();
       if(status==SUCCESS){
         state=2;
-        if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH,NULL)>0) {
+        while(!basicRfPacketIsReady());//wait to receive acknowledgement
+        
+        if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
           if(pRxData[0] == 'C') {
             halLedToggle(1);//WRS received command 
             
-            //Pass pRxData to PC    
-          } 
+          }    
         }
       }
-      
-      basicRfReceiveOn();
       break;
       
     case 2:

@@ -279,7 +279,7 @@ void main(void)
       break;
       
     case 2:
-      while(!basicRfPacketIsReady() && (sendPacket==0));
+      while((sendPacket==0) && !basicRfPacketIsReady());
       if(basicRfPacketIsReady())
       {
         if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
