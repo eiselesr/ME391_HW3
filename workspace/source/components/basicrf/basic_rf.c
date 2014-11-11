@@ -412,6 +412,7 @@ uint8 basicRfInit(basicRfCfg_t* pRfConfig)
 */
 uint8 basicRfSendPacket(uint16 destAddr, uint8* pPayload, uint8 length)
 {
+  
     uint8 mpduLength;
     uint8 status;
 

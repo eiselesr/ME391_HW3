@@ -57,6 +57,8 @@ WIRELESS ROBOTIC SYSTEM FILE --- LOAD ONTO CC2530 RFB 743
 #define ADC_AIN7            0x07     // single ended P0_7
 #define ADC_VDD_3           0x0F     // (vdd/3)
 #define ADC_10_BIT          0x20     // 256 decimation rate 
+#define ADC_7_BIT          0x00     // 64 decimation rate 
+
 
 
 //STATES AND OTHER DATA DEFINES
@@ -80,15 +82,11 @@ WIRELESS ROBOTIC SYSTEM FILE --- LOAD ONTO CC2530 RFB 743
 #define Tadc_LSB 0x86
 #define START 0x24
 
-enum{
-  
-  INITIAL,
-  SENDING,
-  WAITING,
-  READY
-    
-}states;
-
+#define UP_ARROW    72
+#define LEFT_ARROW  75
+#define DOWN_ARROW  80
+#define RIGHT_ARROW 77
+#define delta 25
 
 /***********************************************************************************
 * LOCAL VARIABLES
@@ -98,6 +96,8 @@ unsigned char spiRxBuffer[APP_PAYLOAD_LENGTH];  //20
 static uint8 pTxData[APP_PAYLOAD_LENGTH];
 static uint8 pRxData[APP_PAYLOAD_LENGTH];
 static uint8 coeffBuf[APP_PAYLOAD_LENGTH];
+static uint8 dataBuf[APP_PAYLOAD_LENGTH];
+static uint8 PWMbuff[APP_PAYLOAD_LENGTH];
 
 uint8 status;
 
@@ -113,235 +113,160 @@ double b2dec;
 double c12dec;
 int value; // Value in which ADC conversion is stored.
 int counter = 0;
+int dataCounter = 0;
 int spiPkg;
 int adcPkg;
 int dongleActive = 0;
 int state = 0;
-int sendPacket = 0;
+int sendPressureFlag = 0;
+int sendADCFlag = 0;
+int PWM_1 = 500;
+int PWM_2 = 500;
 
 
 /***********************************************************************************
 * LOCAL FUNCTIONS
 */
 
-static void appADC();
+static void sendADC();
+//static void appADC();
 static void basicRfSetUp();
 static void configurePressure();
 static void readPressure();
+static void collectData(); //says variable dataBuf (gl0bal) and used in this is set but never referenced
 uint8 sendPressure();
+void configureStuff();
 
 _Pragma("vector=0x4B") __near_func __interrupt void LIGHTUP(void);
-
-
+///////////////////////////////////////////////////////////////////////
+//
+/////////////////////////////////////////////////////////////////////////
 void main(void)
 {
-  CLKCONCMD &= 0x00;//Set system clock to 32MHZ => set bit 6 to 1 => [-1-- ----]
-  while(CLKCONSTA&0x40);//waiting for clock to become stable
-  //-------------------------------------------------------------------------
-  // TEST
-  //-------------------------------------------------------------------------
-  P1SEL &= ~ 0x01;  
-  P1DIR |= 0x01;
-  P1_0=1;
-  //-------------------------------------------------------------------------
-  // CONFIGURE ADC 5, 6, and 7
-  //-------------------------------------------------------------------------
-  P0SEL |=  0xE0;//SET P0_7, 6, 5 to peripheral [111-  ----]
-  P0DIR &= ~0xE0;//SET P0_7, 6, 5 to input [000-  ----]
-  APCFG |= 0xE0;// Analog Peripheral I/O enable [111- ----] pg.85, 134  
-  
-  //--------------------------------------------------------------------------
-  // CONFIGURE SPI (USART 1 ALT 2)
-  //--------------------------------------------------------------------------
-  PERCFG |= 0x02; //SET USART 1 I/O location TO ALTERNATIVE 2 => set bit 1 to 1: [---- --1-] - Family pg. 85
-  U1CSR &= ~0xA0; //Set USART 1 TO SPI MODE and Set USART 1 SPI TO MASTER MODE[0-0- ----]
-  
-  //-----------------------------------------------------
-  // CONFIGURE SPI PERIPHERALS
-  //-----------------------------------------------------  
-  P1SEL |=0xE0; //set P1_5, P1_6, P1_7 are peripherals [111- ----]
-  P1SEL &= ~0x1F;  //P1_4(CS),3(SDN),2(GROUND),1(VDD) are GP I/O (SSN) [---0 0000]
-  P1DIR = 0x7F; // SET MO, C, CS, VDD, GND, SDN to output [0111 1111]
-  //P1DIR &=~0x80; //SET MI to input[0--- ----]
-  //-----------------------------------------------------
-  // CONFIGURE SPI BAUD RATE
-  //-----------------------------------------------------   
-  U1BAUD = 0x3B;//BAUD_M= 59  //0x00;// BAUD_M = 0
-  U1GCR |= 0x06;//BAUD_E = 6  //0x11;// BAUD_E = 17
-  //-----------------------------------------------------
-  // CONFIGURE SPI POLARITY, DATA TRANSFER, AND BIT ORDER
-  //-----------------------------------------------------   
-  //CPHA = 0 means:
-  //Data is output on MOSI when SCK goes from CPOL inverted to CPOL, and data input
-  //is sampled on MISO when SCK goes from CPOL to CPOL inverted.
-  //CPOL = 0 => Clock polarity is negative
-  U1GCR &= ~0xC0; //U1GCR.CPOL = U1GCR.CPHA = 0 [00-- ----] - familiy pg. 163
-  U1GCR |=0x20;// U1GCR.ORDER = 1=> MSB first  [--1- ----]
-  
-  //-----------------------------------------------------
-  // CONFIGURE TIMER 1
-  //-----------------------------------------------------
-  PERCFG &= ~0x40; //[-0-- ----]  (TIMER 1 ALT 1)
-  P0SEL |= 0x10; //[---1 1---] (CH 1 and CH 2 to peripheral)
-  P0DIR |= 0x10; //[---1 1---] (CH1 and CH2 to output)
-  P0SEL |= 0x08;
-  P0DIR |= 0x08;
-  //------------------------
-  // CONFIGURE 800Hz Timer
-  //------------------------
-  //Set divisor to 32 => clock speed is 1 MHz, Sets timer to up-down mode (Pg 114) (Family)
-  T1CTL |= 0x0B; //[---- 1-11]
-  T1CTL &= ~0x04; //[---- -0--]
-  //T1CC0 = 625. Need 800hz trigger frq => (1MHZ timer/count)=800 => count = 1250.
-  //In up-down mode, the timer counts up to a number, then counts down to zero to trigger interrupt.
-  //We want the high number to be 1250/2 => 650. 
-  T1CC0L = 0x71;
-  T1CC0H = 0x02; 
-  //------------------------
-  // Set-up PWM
-  //------------------------
-  //Test PWM.  CH1 MAX, CH2 MIN
-  T1CC1H = 0x00;
-  T1CC1L = 0x64;
-  T1CC2H = 0x00;
-  T1CC2L = 0x64;
-  //Set each channel to set-up, clear-down and compare mode
-  T1CCTL1 |= 0x1C;  //[---1 11--]
-  T1CCTL1 &= ~0x63;  //[--0- --00]
-  T1CCTL2 |= 0x1C;  //[---1 11--]
-  T1CCTL2 &= ~0x63;  //[-00- --00]
-  //  IEN0 |= 0x80; //[1--- ----] Allow interrupts
-  //  IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt
-  
-  //  //To Test Timer (5Hz)
-  P0SEL &= ~0x01;
-  P0DIR |= 0x01;
-  
-  
-  //-------------------------------------------------------------------------
-  // RF STUFF
-  //-------------------------------------------------------------------------
+  configureStuff();
   basicRfSetUp();
-  
-  // Initalise board peripherals
-  // halBoardInit();  
-  
   if(halRfInit()==FAILED) {
     HAL_ASSERT(FALSE);
   }
-  
-  halMcuWaitMs(350);  //Why are we waiting here?
-  
-  //begins waiting for msg
+  halMcuWaitMs(350);
   configurePressure();
-  //sendPressure Coefficients
-  //status = basicRfSendPacket(DONGLE_ADDR, spiRxBuffer, 105);
-  //Wait for Handshake
   
-  
-  while(TRUE){
-    // 
-    
-    switch(state)
-    {
-      //uninitialized
-    case 0: 
-      basicRfReceiveOn();
-      while(!basicRfPacketIsReady());
-      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
-        if(pRxData[0] == INIT_COMM_CMD) {        
-//          //turn receive off -- send ack to dongle
-//          basicRfReceiveOff();
-//          pTxData[0] = ACK;  //Read as 0x17 (23)
-//          pTxData[1] = 0x14; //These mean nothing... Just cool that it works =)
-//          pTxData[2]=0x15;
-//          basicRfSendPacket(DONGLE_ADDR, pTxData, 105);
-//          basicRfReceiveOn();
-          state = 1; //Ready State
-        }
-      }
-      break;
-    case 1:
-      while(!basicRfPacketIsReady());
-      
-      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
-        if(pRxData[0] == INIT_CONTDATA_CMD){
-          state = 2;
-          configurePressure();// populates spiTxBuffer
-          basicRfSendPacket(DONGLE_ADDR, coeffBuf, 105);
-          //IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt <- Probably won't use
-        }
-        //if UP
-        //if DOWN
-        //if LEFT
-        //if RIGHT
-      }      
-      break;
-      
-    case 2:
-      while((sendPacket==0) && !basicRfPacketIsReady());
-      if(basicRfPacketIsReady())
-      {
-        if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
-          //if UP
-          //if DOWN
-          //if LEFT
-          //if RIGHT
-        }
-      }
-      if(sendPacket ==1)
-      {
-        readPressure();
-        if(sendPressure()==FAILED){
-          state = 1;//Send pressure, go back to ready state if fail to send
-          //IEN1 &= ~0x02; //[---- --1-] Disable Timer 1 interrupt <- Probably won't use
-        }
-        sendPacket = 0;
-      }
-      break; 
-    }
-    
-    //
-    
-  }
-  
-}
-// appADC();
-//----------------------------------
-//
-//    SEND ADC VALUES 
-//
-//---------------------------------
-static void appADC()
-{
-  //I think we should move the Receive out of this function.  This function should be called after the receive command has been received.
   basicRfReceiveOn();
   
-  //  //----------------------------
-  //  // Start conversion
-  //  //----------------------------
-  //  ADCCON3 = ADC_10_BIT | ADC_AIN5; //Use internal voltage reference at 256 decimation rate(10bit)[0010 ----]
-  //  while(!(ADCCON1 & 0x80)); //WAIT UNTIL END OF CONVERSION
-  //  //----------------------------
-  //  // READ conversion
-  //  //----------------------------
-  //  value = ADCL; //ADCL is the ADC low bits
-  //  value |= (((unsigned int)ADCH) << 8); //ADCH is ADC high bits
-  //  //wait after sending this value 
+  while(!basicRfPacketIsReady()); //WAITING FOR  INIT COMM CMD
   
-  while (TRUE) {
-    //wait until this is true 
-    while(!basicRfPacketIsReady());
-    
-    if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
-      //turn receive off -- send adc info to dongle
-      basicRfReceiveOff();
-      pTxData[0] = value;
-      basicRfSendPacket(DONGLE_ADDR, pTxData, 105);
-      
+  if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) 
+  {
+    if(pRxData[0] == INIT_COMM_CMD) 
+    {        
+      IEN0 |= 0x80; //[1--- ----] Allow interrupts
+      IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt
     }
   }
+  
+  while(!basicRfPacketIsReady()); 
+  
+  if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) //WAITING FOR CMD TO SEND COEFFS
+  {
+    if(pRxData[0] == INIT_CONTDATA_CMD)
+    {
+      basicRfReceiveOff();
+      basicRfSendPacket(DONGLE_ADDR, coeffBuf, 105);
+      
+     basicRfReceiveOn();
+      //IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt <- Probably won't use
+    }
+  }
+  
+  
+  //ENTERS WITH BASIC RF RECEIVE ON 
+  
+  //MAIN LOOP -- SENDS PRESSURE and ADC data and WAIT FOR CMDS to change pulse widths
+  while(TRUE)
+  {   
+    //send pressure data
+    if(sendPressureFlag == 1 && !basicRfPacketIsReady())
+    {
+      basicRfReceiveOff();      
+      readPressure();
+      sendPressure();//does not turn on/off RFReceive
+      collectData();
+      sendPressureFlag = 0;
+      basicRfReceiveOn();
+    }
+    
+    //send ADC data if necessary
+    if(sendADCFlag)
+    {
+      basicRfReceiveOff();
+      //send it      
+      sendADC();
+      sendADCFlag=0;
+      basicRfReceiveOn();
+    }
+    
+    //basicRfReceiveOn();//may not need
+    
+    //see if PC wants a change pulse widths to the motors 
+//    if(basicRfPacketIsReady())
+//    {
+//      //receive msg from dongle
+//      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+//        switch(pRxData[0])
+//        {
+//        case UP_ARROW:    
+//          if(PWM_1<(624-delta))
+//            PWM_1 += delta;
+//          else
+//            PWM_1 = 624;
+//          break;
+//        case DOWN_ARROW:       
+//          if(PWM_1>(1+delta))
+//            PWM_1 -= delta;
+//          else
+//            PWM_1 = 1;
+//          break;
+//        case LEFT_ARROW: 
+//          if(PWM_2<(624-delta))
+//            PWM_2 += delta;
+//          else
+//            PWM_2 = 624;
+//          break;
+//        case RIGHT_ARROW:  
+//          if(PWM_2>(1+delta))
+//            PWM_2 -= delta;
+//          else
+//            PWM_2 = 1;
+//          break;
+//        
+//        }
+//        
+//        
+//         T1CC1H = PWM_1/256;
+//         T1CC1L = PWM_1%256;
+//         T1CC2H = PWM_2/256;
+//         T1CC2L = PWM_2%256;
+//          
+//        
+//        //send back values for PWM_2 and PWM_1
+//        PWMbuff[0] = 'Z';
+//        PWMbuff[1] = PWM_1/256;
+//        PWMbuff[2] = PWM_1%256;
+//        PWMbuff[3] = PWM_2/256;
+//        PWMbuff[4] = PWM_2%256;
+//        
+//        basicRfReceiveOff();
+//        basicRfSendPacket(DONGLE_ADDR, PWMbuff, 105);
+//        basicRfReceiveOn();
+//      }
+      
+  
+    
+    
+  }//end of main while loop
+  
 }
+
 //-----------------------------------------
 // CONFIGURE AND INITIALIZE BASIC RF 
 //
@@ -474,25 +399,60 @@ uint8 sendPressure()
 {  
   uint8 status = FAILED;// FAILED = 1
   int i = 0;
-  while(i<5)
+ // while(i<5)
   {
     pTxData[0] = 'P'; //P => Pressure data
-    pTxData[1] = spiPkg/8;
-    pTxData[2] = spiPkg%8;
-    pTxData[3] = spiTxBuffer[0];
-    pTxData[4] = spiTxBuffer[1];
-    pTxData[5] = spiTxBuffer[2];
-    pTxData[6] = spiTxBuffer[3];
+    pTxData[1] = spiPkg/256;
+    pTxData[2] = spiPkg%256;
+    pTxData[3] = spiRxBuffer[0];
+    pTxData[4] = spiRxBuffer[1];
+    pTxData[5] = spiRxBuffer[2];
+    pTxData[6] = spiRxBuffer[3];
     status = basicRfSendPacket(DONGLE_ADDR, pTxData, APP_PAYLOAD_LENGTH);
     spiPkg++;
     i++;
     if(status == SUCCESS){
-      break;
+    //  break;
     }
   }
   return status;  
 }
 
+//-----------------------------------------
+// Collect Data
+//-----------------------------------------
+static void collectData() 
+{
+  // Start conversion for P0_5
+  ADCCON3 = ADC_7_BIT | ADC_AIN5; //Use internal voltage reference at 64 decimation rate(7bit)[0010 ----]
+  while(!(ADCCON1 & 0x80)); //WAIT UNTIL END OF CONVERSION
+  // Read conversion for P0_5
+  dataBuf[dataCounter+3]=ADCH;//Since we're only using 7bits, only read High
+  
+  ADCCON3 = ADC_7_BIT | ADC_AIN6; //Use internal voltage reference at 64 decimation rate(7bit)[0010 ----]
+  while(!(ADCCON1 & 0x80)); //WAIT UNTIL END OF CONVERSION
+  // Read conversion for P0_5
+  dataBuf[dataCounter+28]=ADCH;//Since we're only using 7bits, only read High
+  
+  ADCCON3 = ADC_7_BIT | ADC_AIN7; //Use internal voltage reference at 64 decimation rate(7bit)[0010 ----]
+  while(!(ADCCON1 & 0x80)); //WAIT UNTIL END OF CONVERSION
+  // Read conversion for P0_5
+  dataBuf[dataCounter+53]=ADCH;//Since we're only using 7bits, only read High
+  
+}
+
+//-----------------------------------------
+// Send ADC Data
+//-----------------------------------------
+static void sendADC() {
+  uint8 status = FAILED;// FAILED = 1
+  int i = 0;
+  dataBuf[0]='A';
+  dataBuf[1] = spiPkg/256;
+  dataBuf[2] = spiPkg%256;
+  status = basicRfSendPacket(DONGLE_ADDR, dataBuf, APP_PAYLOAD_LENGTH);
+  spiPkg++;
+}
 //-----------------------------------------
 // TIMER INTERRUPT
 //-----------------------------------------
@@ -501,12 +461,191 @@ _Pragma("vector=0x4B") __near_func __interrupt void LIGHTUP(void)
   //P1_0 = (P1_0 == 0);
   counter = counter+1;
   
-  if(counter>=160){
+  if(counter>=160){//Every 200 ms
     P0_0 = !P0_0; //LED1
     counter=0;
-    sendPacket = 1;
+    sendPressureFlag = 1;
+    dataCounter++;
+  }
+  if(dataCounter>=25)//Every 5s
+  {  
+    sendADCFlag = 1;
+    dataCounter=0;
+    sendPressureFlag = 0;
   }
 }
+
+void configureStuff()
+{
+  CLKCONCMD &= 0x00;//Set system clock to 32MHZ => set bit 6 to 1 => [-1-- ----]
+  while(CLKCONSTA&0x40);//waiting for clock to become stable
+  //-------------------------------------------------------------------------
+  // TEST
+  //-------------------------------------------------------------------------
+  P1SEL &= ~ 0x01;  
+  P1DIR |= 0x01;
+  P1_0=1;
+  //-------------------------------------------------------------------------
+  // CONFIGURE ADC 5, 6, and 7
+  //-------------------------------------------------------------------------
+  P0SEL |=  0xE0;//SET P0_7, 6, 5 to peripheral [111-  ----]
+  P0DIR &= ~0xE0;//SET P0_7, 6, 5 to input [000-  ----]
+  APCFG |= 0xE0;// Analog Peripheral I/O enable [111- ----] pg.85, 134  
+  
+  //--------------------------------------------------------------------------
+  // CONFIGURE SPI (USART 1 ALT 2)
+  //--------------------------------------------------------------------------
+  PERCFG |= 0x02; //SET USART 1 I/O location TO ALTERNATIVE 2 => set bit 1 to 1: [---- --1-] - Family pg. 85
+  U1CSR &= ~0xA0; //Set USART 1 TO SPI MODE and Set USART 1 SPI TO MASTER MODE[0-0- ----]
+  
+  //-----------------------------------------------------
+  // CONFIGURE SPI PERIPHERALS
+  //-----------------------------------------------------  
+  P1SEL |=0xE0; //set P1_5, P1_6, P1_7 are peripherals [111- ----]
+  P1SEL &= ~0x1F;  //P1_4(CS),3(SDN),2(GROUND),1(VDD) are GP I/O (SSN) [---0 0000]
+  P1DIR = 0x7F; // SET MO, C, CS, VDD, GND, SDN to output [0111 1111]
+  //P1DIR &=~0x80; //SET MI to input[0--- ----]
+  //-----------------------------------------------------
+  // CONFIGURE SPI BAUD RATE
+  //-----------------------------------------------------   
+  U1BAUD = 0x3B;//BAUD_M= 59  //0x00;// BAUD_M = 0
+  U1GCR |= 0x06;//BAUD_E = 6  //0x11;// BAUD_E = 17
+  //-----------------------------------------------------
+  // CONFIGURE SPI POLARITY, DATA TRANSFER, AND BIT ORDER
+  //-----------------------------------------------------   
+  //CPHA = 0 means:
+  //Data is output on MOSI when SCK goes from CPOL inverted to CPOL, and data input
+  //is sampled on MISO when SCK goes from CPOL to CPOL inverted.
+  //CPOL = 0 => Clock polarity is negative
+  U1GCR &= ~0xC0; //U1GCR.CPOL = U1GCR.CPHA = 0 [00-- ----] - familiy pg. 163
+  U1GCR |=0x20;// U1GCR.ORDER = 1=> MSB first  [--1- ----]
+  
+  //-----------------------------------------------------
+  // CONFIGURE TIMER 1
+  //-----------------------------------------------------
+  PERCFG &= ~0x40; //[-0-- ----]  (TIMER 1 ALT 1)
+  P0SEL |= 0x10; //[---1 1---] (CH 1 and CH 2 to peripheral)
+  P0DIR |= 0x10; //[---1 1---] (CH1 and CH2 to output)
+  P0SEL |= 0x08;
+  P0DIR |= 0x08;
+  //------------------------
+  // CONFIGURE 800Hz Timer
+  //------------------------
+  //Set divisor to 32 => clock speed is 1 MHz, Sets timer to up-down mode (Pg 114) (Family)
+  T1CTL |= 0x0B; //[---- 1-11]
+  T1CTL &= ~0x04; //[---- -0--]
+  //T1CC0 = 625. Need 800hz trigger frq => (1MHZ timer/count)=800 => count = 1250.
+  //In up-down mode, the timer counts up to a number, then counts down to zero to trigger interrupt.
+  //We want the high number to be 1250/2 => 650. 
+  T1CC0L = 0x71;
+  T1CC0H = 0x02; 
+  //------------------------
+  // Set-up PWM
+  //------------------------
+  //Test PWM.  CH1 MAX, CH2 MIN
+  T1CC1H = 0x00;
+  T1CC1L = 0x64;
+  T1CC2H = 0x00;
+  T1CC2L = 0x64;
+  //Set each channel to set-up, clear-down and compare mode
+  T1CCTL1 |= 0x1C;  //[---1 11--]
+  T1CCTL1 &= ~0x63;  //[--0- --00]
+  T1CCTL2 |= 0x1C;  //[---1 11--]
+  T1CCTL2 &= ~0x63;  //[-00- --00]
+  
+  //  //To Test Timer (5Hz)
+  P0SEL &= ~0x01;
+  P0DIR |= 0x01;  
+  
+}
+
+////////////////////
+//PROTECT THIS CODE //
+
+
+
+
+//while(TRUE){
+//  
+//  
+//  //  while(!basicRfPacketIsReady());
+//  
+//  switch(state)
+//  {
+//    //uninitialized
+//  case 0: 
+//    basicRfReceiveOn();
+//    while(!basicRfPacketIsReady());
+//    if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+//      if(pRxData[0] == INIT_COMM_CMD) {        
+//        
+//        IEN0 |= 0x80; //[1--- ----] Allow interrupts
+//        IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt
+//        //          //turn receive off -- send ack to dongle
+//        //          basicRfReceiveOff();
+//        //          pTxData[0] = ACK;  //Read as 0x17 (23)
+//        //          pTxData[1] = 0x14; //These mean nothing... Just cool that it works =)
+//        //          pTxData[2]=0x15;
+//        //          basicRfSendPacket(DONGLE_ADDR, pTxData, 105);
+//        //          basicRfReceiveOn();
+//        state = 1; //Ready State
+//      }
+//    }
+//    break;
+//  case 1: // PWM SIGNALS 
+//    while(!basicRfPacketIsReady());
+//    
+//    if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+//      if(pRxData[0] == INIT_CONTDATA_CMD){
+//        state = 2;
+//        configurePressure();// populates spiTxBuffer
+//        basicRfSendPacket(DONGLE_ADDR, coeffBuf, 105);
+//        //IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt <- Probably won't use
+//      }
+//      //if UP
+//      //if DOWN
+//      //if LEFT
+//      //if RIGHT
+//    }      
+//    break;
+//    
+//  case 2: // PWM SIGNALS with continuous data
+//    while((sendPressureFlag == 0) && !basicRfPacketIsReady());
+//    if(basicRfPacketIsReady())
+//    {
+//      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+//        
+//        //if UP
+//        //increase by 800 Hz
+//        //if DOWN
+//        //decrease 800 Hz
+//        
+//        //if LEFT
+//        //if RIGHT
+//      }
+//    }
+//    if(sendPressureFlag == 1)
+//    {
+//      readPressure();
+//      sendPressure();
+//      collectData();
+//      //        if(sendPressure()==FAILED){
+//      //          state = 1;//Send pressure, go back to ready state if fail to send
+//      //          //IEN1 &= ~0x02; //[---- --1-] Disable Timer 1 interrupt <- Probably won't use
+//      //        }
+//      sendPressureFlag = 0;
+//    }
+//    
+//    break; 
+//  }
+//  
+//  //
+//  
+//}
+//
+//}
+
+
 
 //----------------------------------------
 //
@@ -655,3 +794,136 @@ timercount+=1;//Increment timercount by 1 (representing 1ms)
 //      }
 //    }
 //  }
+
+// appADC();
+//----------------------------------
+//
+//    SEND ADC VALUES 
+//
+//---------------------------------
+//static void appADC()
+//{
+//  //I think we should move the Receive out of this function.  This function should be called after the receive command has been received.
+//  basicRfReceiveOn();
+//  
+//  //  //----------------------------
+//  //  // Start conversion
+//  //  //----------------------------
+//  //  ADCCON3 = ADC_10_BIT | ADC_AIN5; //Use internal voltage reference at 256 decimation rate(10bit)[0010 ----]
+//  //  while(!(ADCCON1 & 0x80)); //WAIT UNTIL END OF CONVERSION
+//  //  //----------------------------
+//  //  // READ conversion
+//  //  //----------------------------
+//  //  value = ADCL; //ADCL is the ADC low bits
+//  //  value |= (((unsigned int)ADCH) << 8); //ADCH is ADC high bits
+//  //  //wait after sending this value 
+//  
+//  while (TRUE) {
+//    //wait until this is true 
+//    while(!basicRfPacketIsReady());
+//    
+//    if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+//      //turn receive off -- send adc info to dongle
+//      basicRfReceiveOff();
+//      pTxData[0] = value;
+//      basicRfSendPacket(DONGLE_ADDR, pTxData, 105);
+//      
+//    }
+//  }
+//}
+
+//sendPressure Coefficients
+//status = basicRfSendPacket(DONGLE_ADDR, spiRxBuffer, 105);
+//Wait for Handshake
+
+
+//    basicRfReceiveOn();
+//    while(!basicRfPacketIsReady());
+//    
+//    if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+//        if(pRxData[0] == INIT_COMM_CMD) {        
+//          
+//          IEN0 |= 0x80; //[1--- ----] Allow interrupts
+//          IEN1 |= 0x02; //[---- --1-] Enable Timer 1 interrupt
+//        }
+//      }
+//  
+//  CLKCONCMD &= 0x00;//Set system clock to 32MHZ => set bit 6 to 1 => [-1-- ----]
+//  while(CLKCONSTA&0x40);//waiting for clock to become stable
+//  //-------------------------------------------------------------------------
+//  // TEST
+//  //-------------------------------------------------------------------------
+//  P1SEL &= ~ 0x01;  
+//  P1DIR |= 0x01;
+//  P1_0=1;
+//  //-------------------------------------------------------------------------
+//  // CONFIGURE ADC 5, 6, and 7
+//  //-------------------------------------------------------------------------
+//  P0SEL |=  0xE0;//SET P0_7, 6, 5 to peripheral [111-  ----]
+//  P0DIR &= ~0xE0;//SET P0_7, 6, 5 to input [000-  ----]
+//  APCFG |= 0xE0;// Analog Peripheral I/O enable [111- ----] pg.85, 134  
+//  
+//  //--------------------------------------------------------------------------
+//  // CONFIGURE SPI (USART 1 ALT 2)
+//  //--------------------------------------------------------------------------
+//  PERCFG |= 0x02; //SET USART 1 I/O location TO ALTERNATIVE 2 => set bit 1 to 1: [---- --1-] - Family pg. 85
+//  U1CSR &= ~0xA0; //Set USART 1 TO SPI MODE and Set USART 1 SPI TO MASTER MODE[0-0- ----]
+//  
+//  //-----------------------------------------------------
+//  // CONFIGURE SPI PERIPHERALS
+//  //-----------------------------------------------------  
+//  P1SEL |=0xE0; //set P1_5, P1_6, P1_7 are peripherals [111- ----]
+//  P1SEL &= ~0x1F;  //P1_4(CS),3(SDN),2(GROUND),1(VDD) are GP I/O (SSN) [---0 0000]
+//  P1DIR = 0x7F; // SET MO, C, CS, VDD, GND, SDN to output [0111 1111]
+//  //P1DIR &=~0x80; //SET MI to input[0--- ----]
+//  //-----------------------------------------------------
+//  // CONFIGURE SPI BAUD RATE
+//  //-----------------------------------------------------   
+//  U1BAUD = 0x3B;//BAUD_M= 59  //0x00;// BAUD_M = 0
+//  U1GCR |= 0x06;//BAUD_E = 6  //0x11;// BAUD_E = 17
+//  //-----------------------------------------------------
+//  // CONFIGURE SPI POLARITY, DATA TRANSFER, AND BIT ORDER
+//  //-----------------------------------------------------   
+//  //CPHA = 0 means:
+//  //Data is output on MOSI when SCK goes from CPOL inverted to CPOL, and data input
+//  //is sampled on MISO when SCK goes from CPOL to CPOL inverted.
+//  //CPOL = 0 => Clock polarity is negative
+//  U1GCR &= ~0xC0; //U1GCR.CPOL = U1GCR.CPHA = 0 [00-- ----] - familiy pg. 163
+//  U1GCR |=0x20;// U1GCR.ORDER = 1=> MSB first  [--1- ----]
+//  
+//  //-----------------------------------------------------
+//  // CONFIGURE TIMER 1
+//  //-----------------------------------------------------
+//  PERCFG &= ~0x40; //[-0-- ----]  (TIMER 1 ALT 1)
+//  P0SEL |= 0x10; //[---1 1---] (CH 1 and CH 2 to peripheral)
+//  P0DIR |= 0x10; //[---1 1---] (CH1 and CH2 to output)
+//  P0SEL |= 0x08;
+//  P0DIR |= 0x08;
+//  //------------------------
+//  // CONFIGURE 800Hz Timer
+//  //------------------------
+//  //Set divisor to 32 => clock speed is 1 MHz, Sets timer to up-down mode (Pg 114) (Family)
+//  T1CTL |= 0x0B; //[---- 1-11]
+//  T1CTL &= ~0x04; //[---- -0--]
+//  //T1CC0 = 625. Need 800hz trigger frq => (1MHZ timer/count)=800 => count = 1250.
+//  //In up-down mode, the timer counts up to a number, then counts down to zero to trigger interrupt.
+//  //We want the high number to be 1250/2 => 650. 
+//  T1CC0L = 0x71;
+//  T1CC0H = 0x02; 
+//  //------------------------
+//  // Set-up PWM
+//  //------------------------
+//  //Test PWM.  CH1 MAX, CH2 MIN
+//  T1CC1H = 0x00;
+//  T1CC1L = 0x64;
+//  T1CC2H = 0x00;
+//  T1CC2L = 0x64;
+//  //Set each channel to set-up, clear-down and compare mode
+//  T1CCTL1 |= 0x1C;  //[---1 11--]
+//  T1CCTL1 &= ~0x63;  //[--0- --00]
+//  T1CCTL2 |= 0x1C;  //[---1 11--]
+//  T1CCTL2 &= ~0x63;  //[-00- --00]
+//  
+//  //  //To Test Timer (5Hz)
+//  P0SEL &= ~0x01;
+//  P0DIR |= 0x01;

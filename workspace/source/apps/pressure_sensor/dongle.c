@@ -42,7 +42,7 @@ DONGLE FILE --- LOAD ONTO CC2530 RFB 525
 #define INIT_COMM_CMD 1
 #define INIT_COEF_CMD 2
 #define INIT_CONTDATA_CMD 3
-#define ACK         23
+
 
 // Application states
 #define IDLE                      0
@@ -50,6 +50,10 @@ DONGLE FILE --- LOAD ONTO CC2530 RFB 525
 
 #define DONGLE_ADDR   LIGHT_ADDR
 #define ROBOT_ADDR    SWITCH_ADDR
+#define UP_ARROW    72
+#define LEFT_ARROW  75
+#define DOWN_ARROW  80
+#define RIGHT_ARROW 77
 enum{
   INITIAL,
   SENDING,
@@ -69,6 +73,8 @@ uint8 bob;
 uint8 status = 0;//boolean
 int receiveData=0;
 int state = 0;
+int ACK = 0;
+int changePWMflag = 0; 
 
 #ifdef SECURITY_CCM
 // Security key
@@ -85,11 +91,15 @@ static uint8 key[]= {
 //static void appSwitch();
 
 static void basicRfSetUp();
-static int initRobotComm();
-static int receiveCoefficients();
-static void receiveContinuousData();
+//static int initRobotComm();
+//static int receiveCoefficients();
+//static void receiveContinuousData();
 void uartStartRxForIsr();
 void configureUSART0forUART_ALT1();
+
+_Pragma("vector=0x13") __near_func __interrupt void UART0_RX_ISR(void);
+
+
 
 
 
@@ -100,10 +110,13 @@ void main(void)
 {
   // Initalise board peripherals
   halBoardInit();
+  
+  
   basicRfSetUp();
   
   // Initalise hal_rf
-  if(halRfInit()==FAILED) {
+  if(halRfInit()==FAILED)
+  {
     HAL_ASSERT(FALSE);
   }
   
@@ -114,55 +127,230 @@ void main(void)
   configureUSART0forUART_ALT1();
   uartStartRxForIsr();
   
-  //while(!start); //waiting for 'a' key from PC 
+  while(!start); //waiting for 'a' key from PC 
   //respond to PC -- going to try to start up WRS 
   
-  //Main Overall Loop
-  while(TRUE){
+  pTxData[0] = INIT_COMM_CMD;
+  basicRfReceiveOff();
+  if(basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH))
+  {
+    state=1;
+  }
+  basicRfReceiveOn();
+  //wait for ACK from WRS
+  
+  pTxData[0] = INIT_COEF_CMD;
+  basicRfReceiveOff();
+  if(basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH))
+  {
+    basicRfReceiveOn();
     
-    switch (state)
+    state=2;//continuous?
+    
+    //WAIT FOR COEFFICIENTS FROM WRS
+    while(!basicRfPacketIsReady());//wait to receive acknowledgement
+    
+    if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) 
     {
-      
-    case 0: //Startup and send initialization command to Robot
-      pTxData[0] = INIT_COMM_CMD;
-      
-      basicRfReceiveOff();
-      
-      status=basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
-      if(status==SUCCESS){
-        state=1;
-      }
-      
-      basicRfReceiveOn();
-      break;
-      
-    case 1: //Request Coefficients
-      pTxData[0] = INIT_COEF_CMD;
-      basicRfReceiveOff();
-      
-      status=basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
-      
-      basicRfReceiveOn();
-      if(status==SUCCESS){
-        state=2;
-        while(!basicRfPacketIsReady());//wait to receive acknowledgement
-        
-        if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
-          if(pRxData[0] == 'C') {
-            halLedToggle(1);//WRS received command 
-            
-          }    
+      if(pRxData[0] == 'C') 
+      {  
+        //Pass to PC
+        for (unsigned int uartTxIndex = 0; uartTxIndex<105; uartTxIndex++)
+        {
+          U0CSR &= ~0x02; //SET U0TX_BYTE to 0
+          U0DBUF = pRxData[uartTxIndex];      
+          while (!(U0CSR&0x02));
         }
-      }
-      break;
-      
-    case 2:
-      
-      break;
-      
+        // while(!ACK);//waiting for acknowledgement
+      }    
     }
   }
+  
+  //finished sending coefficients to PC 
+  
+  basicRfReceiveOn();
+  
+  while(TRUE)
+  {
+    //Receive package from WRS
+    if(basicRfPacketIsReady())
+    { 
+      
+      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+        
+        if((pRxData[0] == 'P')||(pRxData[0] == 'A'))
+        {          
+          //SEND DATA TO PC 
+          for (unsigned int uartTxIndex = 0; uartTxIndex<105; uartTxIndex++)
+          {
+            U0CSR &= ~0x02; //SET U0TX_BYTE to 0
+            U0DBUF = pRxData[uartTxIndex];      
+            while (!(U0CSR&0x02));
+          }
+        }
+      }
+      
+    }
+    
+    //Receive CMD from PC 
+    if(changePWMflag)//have this be set in interrupt 
+    {
+      basicRfReceiveOff();
+      if(basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH)==SUCCESS)//send PWM info to WRS
+      {
+        basicRfReceiveOn();
+        
+        while(changePWMflag)//Keep receiving until PWM acknowledge is sent
+        {
+          while(!basicRfPacketIsReady());//waiting for acknowledgement -- important here i think
+          
+          if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) 
+          {
+            if(pRxData[0] == 'Z')
+            {
+              //receive current duty cycle and send back to PC 
+              for (unsigned int uartTxIndex = 0; uartTxIndex<105; uartTxIndex++)
+              {
+                U0CSR &= ~0x02; //SET U0TX_BYTE to 0
+                U0DBUF = pRxData[uartTxIndex];      
+                while (!(U0CSR&0x02));
+              }
+              changePWMflag = 0;
+            }
+            //else send pressure?
+          }
+        }
+      }
+    }
+    
+  }//END OF MAIN WHILE LOOP
 }
+
+
+//-------------------------------------------
+// RX interrupt service routine
+//-------------------------------------------
+
+_Pragma("vector=0x13") __near_func __interrupt void UART0_RX_ISR(void)
+{	
+  IEN0 &= ~0x80;//DISABLE INTERRUPTS
+  URX0IF = 0; //Interrupt not pending
+  
+  unsigned int keyVal = U0DBUF;
+  
+  switch(keyVal)    
+  {
+  case 97:// 'a' key
+    start = 1;//Start communication with WRS
+    break;
+  case 107:
+    readCoefficients=1;//start reading coeffs from pressure sensor
+    break;
+  case 'Z': //an idea for getting ack from PC that it is done reading in all data -- since this does take some time..
+    ACK = 1;
+    break;
+  case UP_ARROW:
+    pTxData[0] = keyVal;
+    changePWMflag = 1; 
+    break;
+  case DOWN_ARROW:
+    pTxData[0] = keyVal;
+    changePWMflag = 1; 
+    break;
+  case LEFT_ARROW:
+    pTxData[0] = keyVal;
+    changePWMflag = 1; 
+    break;
+  case RIGHT_ARROW:
+    pTxData[0] = keyVal;
+    changePWMflag = 1; 
+    break;
+  }
+  IEN0 |= 0x80; //ENABLE INTERRUPTS GENERALLY
+}
+
+//Main Overall Loop
+//  while(TRUE){ 
+//    
+//    switch (state)
+//    {
+//      
+//    case 0: //Startup and send initialization command to Robot
+//      pTxData[0] = INIT_COMM_CMD;
+//      
+//      basicRfReceiveOff();
+//      
+//      status=basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+//      if(status==SUCCESS){
+//        state=1;
+//      }
+//      
+//      basicRfReceiveOn();
+//      break;
+//      
+//    case 1: //Request Coefficients
+//      pTxData[0] = INIT_COEF_CMD;
+//      basicRfReceiveOff();
+//      
+//      status=basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+//      
+//      basicRfReceiveOn();
+//      
+//      if(status==SUCCESS)
+//      {
+//        state=2;
+//        while(!basicRfPacketIsReady());//wait to receive acknowledgement
+//        
+//        if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) 
+//        {
+//          if(pRxData[0] == 'C') 
+//          {
+//            halLedToggle(1);//WRS received command 
+//            //Pass to PC
+//            
+//            for (unsigned int uartTxIndex = 0; uartTxIndex<105; uartTxIndex++)
+//            {
+//              U0CSR &= ~0x02; //SET U0TX_BYTE to 0
+//              U0DBUF = pRxData[uartTxIndex];      
+//              while (!(U0CSR&0x02));
+//            }
+//            // while(!ACK);//waiting for acknowledgement
+//          }    
+//        }
+//      }
+//      break;
+//      
+//      
+//    case 2: //receiving pressure data??
+//      //      basicRfReceiveOff();
+//      //      
+//      //      status=basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+//      //      
+//      //      basicRfReceiveOn();
+//      //      
+//      while(!basicRfPacketIsReady());//wait to receive acknowledgement
+//      
+//      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+//        if((pRxData[0] == 'P')||(pRxData[0] == 'A'))
+//        {//Pressure
+//          
+//          halLedToggle(1);//WRS received command 
+//          
+//          //Pass data from WRS to PC -- info to computer
+//          for (unsigned int uartTxIndex = 0; uartTxIndex<105; uartTxIndex++)
+//          {
+//            U0CSR &= ~0x02; //SET U0TX_BYTE to 0
+//            U0DBUF = pRxData[uartTxIndex];      
+//            while (!(U0CSR&0x02));
+//          }
+//        }    
+//      }
+//      break;
+//      
+//    }
+//  }
+//}
+
 
 
 //-------------------------------------------
@@ -192,28 +380,8 @@ static void basicRfSetUp()
 //-------------------------------------------
 //      Receive Continuous Data
 //-------------------------------------------
-static void receiveContinuousData(){
-  
-  pTxData[0] = INIT_CONTDATA_CMD;
-  
-  basicRfReceiveOff();
-  
-  basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
-  
-  basicRfReceiveOn();
-  
-  while(!basicRfPacketIsReady());//wait to receive acknowledgement
-  
-  if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
-    if(pRxData[0] == 'C') {
-      halLedToggle(1);//WRS received command 
-      
-    }    
-  }
-  //Ready to collect data
-  
-  
-}
+
+//static void receiveContinuousData(){} //Ready to collect data}
 
 
 //-------------------------------------------
@@ -248,27 +416,6 @@ void uartStartRxForIsr()
   URX0IF = 0;
   U0CSR |= 0x40;//Enables UART receiver
   IEN0 |= 0x04; //Enable USART0 RX interrupt => Set bit 2 to 1 (family pg. 45)
-  IEN0 |= 0x80; //ENABLE INTERRUPTS GENERALLY
-}
-
-//-------------------------------------------
-// RX interrupt service routine
-//-------------------------------------------
-_Pragma("vector=0x13") __near_func __interrupt void UART0_RX_ISR(void);
-_Pragma("vector=0x13") __near_func __interrupt void UART0_RX_ISR(void)
-{	
-  IEN0 &= ~0x80;//DISABLE INTERRUPTS
-  URX0IF = 0; //Interrupt not pending
-  unsigned int keyVal = U0DBUF;
-  switch(keyVal)
-  {
-  case 97:// 'a' key
-    start = 1;//Start communication with WRS
-    break;
-  case 107:
-    readCoefficients=1;//start reading coeffs from pressure sensor
-    break;
-  }
   IEN0 |= 0x80; //ENABLE INTERRUPTS GENERALLY
 }
 
@@ -308,107 +455,87 @@ _Pragma("vector=0x13") __near_func __interrupt void UART0_RX_ISR(void)
 //  (basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0);
 //  //received data from pRxData 
 //  //read it and do something     
-//}
-//-----------------------------------------------------------------------------
-
-//------------------------------------------------------------------   
-////----SENDING 
-//// Keep Receiver off when not needed to save power
-//    basicRfReceiveOff();
-//
-//    // Main loop for SENDING 
-//    while (TRUE) {
-//      bob = halJoystickPushed();
-//        if(bob) {
-//            basicRfSendPacket(LIGHT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
-//            // Put MCU to sleep. It will wake up on joystick interrupt
-//            halIntOff();
-//            halMcuSetLowPowerMode(HAL_MCU_LPM_3); // Will turn on global
-//            // interrupt enable
-//            halIntOn();
-//        }
-//    }
 
 
 
-//
-///***********************************************************************************
-//* @fn          appSwitch
-//*
-//* @brief       Application code for switch application. Puts MCU in
-//*              endless loop to wait for commands from from switch
-//*
-//* @param       basicRfConfig - file scope variable. Basic RF configuration data
-//*              pTxData - file scope variable. Pointer to buffer for TX
-//*              payload
-//*              appState - file scope variable. Holds application state
-//*
-//* @return      none
-//*/
-
-
-///***********************************************************************************
-//* @fn          appLight
-//*
-//* @brief       Application code for light application. Puts MCU in endless
-//*              loop waiting for user input from joystick.
-//*
-//* @param       basicRfConfig - file scope variable. Basic RF configuration data
-//*              pRxData - file scope variable. Pointer to buffer for RX data
-//*
-//* @return      none
-//*/
-//static void appLight()
-//{
-//
-//
-//    // Initialize BasicRF
-//    basicRfConfig.myAddr = LIGHT_ADDR;
-//    if(basicRfInit(&basicRfConfig)==FAILED) {
-//      HAL_ASSERT(FALSE);
-//    }
-//    basicRfReceiveOn();
-//
-//    // Main loop
-//    while (TRUE) {
-//        while(!basicRfPacketIsReady());
-//
-//        if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
-//            if(pRxData[0] == LIGHT_TOGGLE_CMD) {
-//                halLedToggle(1);
+////Main Overall Loop
+//  while(TRUE){ 
+//    
+//    switch (state)
+//    {
+//      
+//    case 0: //Startup and send initialization command to Robot
+//      pTxData[0] = INIT_COMM_CMD;
+//      
+//      basicRfReceiveOff();
+//      
+//      status=basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+//      if(status==SUCCESS){
+//        state=1;
+//      }
+//      
+//      basicRfReceiveOn();
+//      break;
+//      
+//    case 1: //Request Coefficients
+//      pTxData[0] = INIT_COEF_CMD;
+//      basicRfReceiveOff();
+//      
+//      status=basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+//      
+//      basicRfReceiveOn();
+//      
+//      if(status==SUCCESS)
+//      {
+//        state=2;
+//        while(!basicRfPacketIsReady());//wait to receive acknowledgement
+//        
+//        if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) 
+//        {
+//          if(pRxData[0] == 'C') 
+//          {
+//            halLedToggle(1);//WRS received command 
+//            //Pass to PC
+//            
+//            for (unsigned int uartTxIndex = 0; uartTxIndex<105; uartTxIndex++)
+//            {
+//              U0CSR &= ~0x02; //SET U0TX_BYTE to 0
+//              U0DBUF = pRxData[uartTxIndex];      
+//              while (!(U0CSR&0x02));
 //            }
+//            // while(!ACK);//waiting for acknowledgement
+//          }    
 //        }
+//      }
+//      break;
+//      
+//      
+//    case 2: //receiving pressure data??
+//      //      basicRfReceiveOff();
+//      //      
+//      //      status=basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+//      //      
+//      //      basicRfReceiveOn();
+//      //      
+//      while(!basicRfPacketIsReady());//wait to receive acknowledgement
+//      
+//      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+//        if((pRxData[0] == 'P')||(pRxData[0] == 'A'))
+//        {//Pressure
+//          
+//          halLedToggle(1);//WRS received command 
+//          
+//          //Pass data from WRS to PC -- info to computer
+//          for (unsigned int uartTxIndex = 0; uartTxIndex<105; uartTxIndex++)
+//          {
+//            U0CSR &= ~0x02; //SET U0TX_BYTE to 0
+//            U0DBUF = pRxData[uartTxIndex];      
+//            while (!(U0CSR&0x02));
+//          }
+//        }    
+//      }
+//      break;
+//      
 //    }
-//}
-//
-//static void appSwitch()
-//{
-//    //volatile uint8 bob;
-//
-//    pTxData[0] = LIGHT_TOGGLE_CMD;
-//
-//    // Initialize BasicRF
-//    basicRfConfig.myAddr = SWITCH_ADDR;
-//    if(basicRfInit(&basicRfConfig)==FAILED) {
-//      HAL_ASSERT(FALSE);
-//    }
-//
-//    // Keep Receiver off when not needed to save power
-//    basicRfReceiveOff();
-//
-//    // Main loop
-//    while (TRUE) {
-//      bob = halJoystickPushed();
-//        if(bob) {
-//            basicRfSendPacket(LIGHT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
-//            P1_0=!P1_0;
-//
-//            // Put MCU to sleep. It will wake up on joystick interrupt
-//            halIntOff();
-//            halMcuSetLowPowerMode(HAL_MCU_LPM_3); // Will turn on global
-//            // interrupt enable
-//            halIntOn();
-//
-//        }
-//    }
+//  }
 //}
