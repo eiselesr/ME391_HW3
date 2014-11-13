@@ -66,6 +66,7 @@ enum{
 
 static uint8 pTxData[APP_PAYLOAD_LENGTH];
 static uint8 pRxData[APP_PAYLOAD_LENGTH];
+
 static basicRfCfg_t basicRfConfig;
 int start = 0;
 uint8 readCoefficients = 0;
@@ -75,6 +76,8 @@ int receiveData=0;
 int state = 0;
 int ACK = 0;
 int changePWMflag = 0; 
+int16* myRSSI;
+int8 getRSSI;
 
 #ifdef SECURITY_CCM
 // Security key
@@ -132,7 +135,7 @@ void main(void)
   
   pTxData[0] = INIT_COMM_CMD;
   basicRfReceiveOff();
-  if(basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH))
+  if(basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH)==SUCCESS)
   {
     state=1;
   }
@@ -141,7 +144,7 @@ void main(void)
   
   pTxData[0] = INIT_COEF_CMD;
   basicRfReceiveOff();
-  if(basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH))
+  if(basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH)==SUCCESS)
   {
     basicRfReceiveOn();
     
@@ -176,8 +179,9 @@ void main(void)
     if(basicRfPacketIsReady())
     { 
       
-      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
-        
+      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, myRSSI)>0) {
+        getRSSI = basicRfGetRssi();
+        pRxData[104]=getRSSI;
         if((pRxData[0] == 'P')||(pRxData[0] == 'A'))
         {          
           //SEND DATA TO PC 
@@ -195,34 +199,38 @@ void main(void)
     //Receive CMD from PC 
     if(changePWMflag)//have this be set in interrupt 
     {
-      basicRfReceiveOff();
+      //basicRfReceiveOff();
+      
       if(basicRfSendPacket(ROBOT_ADDR, pTxData, APP_PAYLOAD_LENGTH)==SUCCESS)//send PWM info to WRS
       {
-        basicRfReceiveOn();
         
-        while(changePWMflag)//Keep receiving until PWM acknowledge is sent
-        {
-          while(!basicRfPacketIsReady());//waiting for acknowledgement -- important here i think
-          
-          if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) 
-          {
-            if(pRxData[0] == 'Z')
-            {
-              //receive current duty cycle and send back to PC 
-              for (unsigned int uartTxIndex = 0; uartTxIndex<105; uartTxIndex++)
-              {
-                U0CSR &= ~0x02; //SET U0TX_BYTE to 0
-                U0DBUF = pRxData[uartTxIndex];      
-                while (!(U0CSR&0x02));
-              }
-              changePWMflag = 0;
-            }
-            //else send pressure?
-          }
-        }
+        changePWMflag=0;
       }
+      //basicRfReceiveOn();
+        
+        //        while(changePWMflag)//Keep receiving until PWM acknowledge is sent
+        //        {
+        //          while(!basicRfPacketIsReady());//waiting for acknowledgement -- important here i think
+        //          
+        //          if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) 
+        //          {
+        //            if(pRxData[0] == 'Z')
+        //            {
+        //              //receive current duty cycle and send back to PC 
+        //              for (unsigned int uartTxIndex = 0; uartTxIndex<105; uartTxIndex++)
+        //              {
+        //                U0CSR &= ~0x02; //SET U0TX_BYTE to 0
+        //                U0DBUF = pRxData[uartTxIndex];      
+        //                while (!(U0CSR&0x02));
+        //              }
+        //              changePWMflag = 0;
+        //            }
+        //            //else send pressure?
+        //          }
+        //        }
+        //      }
+      
     }
-    
   }//END OF MAIN WHILE LOOP
 }
 

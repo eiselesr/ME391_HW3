@@ -55,6 +55,9 @@ WIRELESS ROBOTIC SYSTEM FILE --- LOAD ONTO CC2530 RFB 743
 #define ADC_AIN5            0x05     // single ended P0_5
 #define ADC_AIN6            0x06     // single ended P0_6
 #define ADC_AIN7            0x07     // single ended P0_7
+#define ADC_AIN4            0x04     // single ended P0_4
+#define ADC_AIN1            0x01     // single ended P0_1
+#define ADC_AIN0            0x00     // single ended P0_0
 #define ADC_VDD_3           0x0F     // (vdd/3)
 #define ADC_10_BIT          0x20     // 256 decimation rate 
 #define ADC_7_BIT          0x00     // 64 decimation rate 
@@ -87,6 +90,7 @@ WIRELESS ROBOTIC SYSTEM FILE --- LOAD ONTO CC2530 RFB 743
 #define DOWN_ARROW  80
 #define RIGHT_ARROW 77
 #define delta 25
+#define OFFSET 73
 
 /***********************************************************************************
 * LOCAL VARIABLES
@@ -120,8 +124,9 @@ int dongleActive = 0;
 int state = 0;
 int sendPressureFlag = 0;
 int sendADCFlag = 0;
-int PWM_1 = 500;
-int PWM_2 = 500;
+int PWM_1 = 624;
+int PWM_2 = 624;
+uint8 rssiPow;
 
 
 /***********************************************************************************
@@ -184,71 +189,75 @@ void main(void)
   //MAIN LOOP -- SENDS PRESSURE and ADC data and WAIT FOR CMDS to change pulse widths
   while(TRUE)
   {   
+    //Get RSSI
+    if(RSSISTAT & 0x01){
+      rssiPow = RSSI - OFFSET;
+    }
     //send pressure data
     if(sendPressureFlag == 1 && !basicRfPacketIsReady())
     {
-      basicRfReceiveOff();      
+      //basicRfReceiveOff();      
       readPressure();
       sendPressure();//does not turn on/off RFReceive
       collectData();
       sendPressureFlag = 0;
-      basicRfReceiveOn();
+      //basicRfReceiveOn();
     }
     
     //send ADC data if necessary
     if(sendADCFlag)
     {
-      basicRfReceiveOff();
+      //basicRfReceiveOff();
       //send it      
       sendADC();
       sendADCFlag=0;
-      basicRfReceiveOn();
+      //basicRfReceiveOn();
     }
     
     //basicRfReceiveOn();//may not need
     
     //see if PC wants a change pulse widths to the motors 
-//    if(basicRfPacketIsReady())
-//    {
-//      //receive msg from dongle
-//      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
-//        switch(pRxData[0])
-//        {
-//        case UP_ARROW:    
-//          if(PWM_1<(624-delta))
-//            PWM_1 += delta;
-//          else
-//            PWM_1 = 624;
-//          break;
-//        case DOWN_ARROW:       
-//          if(PWM_1>(1+delta))
-//            PWM_1 -= delta;
-//          else
-//            PWM_1 = 1;
-//          break;
-//        case LEFT_ARROW: 
-//          if(PWM_2<(624-delta))
-//            PWM_2 += delta;
-//          else
-//            PWM_2 = 624;
-//          break;
-//        case RIGHT_ARROW:  
-//          if(PWM_2>(1+delta))
-//            PWM_2 -= delta;
-//          else
-//            PWM_2 = 1;
-//          break;
-//        
-//        }
-//        
-//        
-//         T1CC1H = PWM_1/256;
-//         T1CC1L = PWM_1%256;
-//         T1CC2H = PWM_2/256;
-//         T1CC2L = PWM_2%256;
-//          
-//        
-//        //send back values for PWM_2 and PWM_1
+    if(basicRfPacketIsReady())
+    {
+      //receive msg from dongle
+      if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+        switch(pRxData[0])
+        {
+        case DOWN_ARROW:    
+          if(PWM_1<(624-delta))
+            PWM_1 += delta;
+          else
+            PWM_1 = 624;
+          break;
+        case UP_ARROW:       
+          if(PWM_1>(1+delta))
+            PWM_1 -= delta;
+          else
+            PWM_1 = 1;
+          break;
+        case LEFT_ARROW: 
+          if(PWM_2<(624-delta))
+            PWM_2 += delta;
+          else
+            PWM_2 = 624;
+          break;
+        case RIGHT_ARROW:  
+          if(PWM_2>(1+delta))
+            PWM_2 -= delta;
+          else
+            PWM_2 = 1;
+          break;
+        
+        }
+        
+        
+         T1CC3H = PWM_1/256;
+         T1CC3L = PWM_1%256;
+         T1CC4H = PWM_2/256;
+         T1CC4L = PWM_2%256;
+          
+        
+        //send back values for PWM_2 and PWM_1
 //        PWMbuff[0] = 'Z';
 //        PWMbuff[1] = PWM_1/256;
 //        PWMbuff[2] = PWM_1%256;
@@ -258,7 +267,8 @@ void main(void)
 //        basicRfReceiveOff();
 //        basicRfSendPacket(DONGLE_ADDR, PWMbuff, 105);
 //        basicRfReceiveOn();
-//      }
+      }
+    }
       
   
     
@@ -408,6 +418,7 @@ uint8 sendPressure()
     pTxData[4] = spiRxBuffer[1];
     pTxData[5] = spiRxBuffer[2];
     pTxData[6] = spiRxBuffer[3];
+    pTxData[102] = rssiPow;
     status = basicRfSendPacket(DONGLE_ADDR, pTxData, APP_PAYLOAD_LENGTH);
     spiPkg++;
     i++;
@@ -424,17 +435,17 @@ uint8 sendPressure()
 static void collectData() 
 {
   // Start conversion for P0_5
-  ADCCON3 = ADC_7_BIT | ADC_AIN5; //Use internal voltage reference at 64 decimation rate(7bit)[0010 ----]
+  ADCCON3 = ADC_7_BIT | ADC_AIN4; //Use internal voltage reference at 64 decimation rate(7bit)[0010 ----]
   while(!(ADCCON1 & 0x80)); //WAIT UNTIL END OF CONVERSION
   // Read conversion for P0_5
   dataBuf[dataCounter+3]=ADCH;//Since we're only using 7bits, only read High
   
-  ADCCON3 = ADC_7_BIT | ADC_AIN6; //Use internal voltage reference at 64 decimation rate(7bit)[0010 ----]
+  ADCCON3 = ADC_7_BIT | ADC_AIN1; //Use internal voltage reference at 64 decimation rate(7bit)[0010 ----]
   while(!(ADCCON1 & 0x80)); //WAIT UNTIL END OF CONVERSION
   // Read conversion for P0_5
   dataBuf[dataCounter+28]=ADCH;//Since we're only using 7bits, only read High
   
-  ADCCON3 = ADC_7_BIT | ADC_AIN7; //Use internal voltage reference at 64 decimation rate(7bit)[0010 ----]
+  ADCCON3 = ADC_7_BIT | ADC_AIN0; //Use internal voltage reference at 64 decimation rate(7bit)[0010 ----]
   while(!(ADCCON1 & 0x80)); //WAIT UNTIL END OF CONVERSION
   // Read conversion for P0_5
   dataBuf[dataCounter+53]=ADCH;//Since we're only using 7bits, only read High
@@ -450,6 +461,7 @@ static void sendADC() {
   dataBuf[0]='A';
   dataBuf[1] = spiPkg/256;
   dataBuf[2] = spiPkg%256;
+  dataBuf[102] = rssiPow;
   status = basicRfSendPacket(DONGLE_ADDR, dataBuf, APP_PAYLOAD_LENGTH);
   spiPkg++;
 }
@@ -488,9 +500,9 @@ void configureStuff()
   //-------------------------------------------------------------------------
   // CONFIGURE ADC 5, 6, and 7
   //-------------------------------------------------------------------------
-  P0SEL |=  0xE0;//SET P0_7, 6, 5 to peripheral [111-  ----]
-  P0DIR &= ~0xE0;//SET P0_7, 6, 5 to input [000-  ----]
-  APCFG |= 0xE0;// Analog Peripheral I/O enable [111- ----] pg.85, 134  
+  P0SEL |=  0x13;//SET P0_7, 6, 5 to peripheral [---1 --11]
+  P0DIR &= ~0x13;//SET P0_7, 6, 5 to input [---0  --00]
+  APCFG |= 0x13;// Analog Peripheral I/O enable [---1 --11] pg.85, 134  
   
   //--------------------------------------------------------------------------
   // CONFIGURE SPI (USART 1 ALT 2)
@@ -523,11 +535,10 @@ void configureStuff()
   //-----------------------------------------------------
   // CONFIGURE TIMER 1
   //-----------------------------------------------------
-  PERCFG &= ~0x40; //[-0-- ----]  (TIMER 1 ALT 1)
-  P0SEL |= 0x10; //[---1 1---] (CH 1 and CH 2 to peripheral)
-  P0DIR |= 0x10; //[---1 1---] (CH1 and CH2 to output)
-  P0SEL |= 0x08;
-  P0DIR |= 0x08;
+  PERCFG |= 0x40; //[-1-- ----]  (TIMER 1 ALT 2)
+  //PERCFG |= 0x03;
+  P0SEL |= 0xC0; //[11-- ----] (CH 1 and CH 2 to peripheral)
+  P0DIR |= 0xC0; //[11-- ----] (CH1 and CH2 to output)
   //------------------------
   // CONFIGURE 800Hz Timer
   //------------------------
@@ -542,16 +553,17 @@ void configureStuff()
   //------------------------
   // Set-up PWM
   //------------------------
+  P2DIR |= 0xC0;
   //Test PWM.  CH1 MAX, CH2 MIN
-  T1CC1H = 0x00;
-  T1CC1L = 0x64;
-  T1CC2H = 0x00;
-  T1CC2L = 0x64;
+  T1CC3H = 0x02;
+  T1CC3L = 0x70;
+  T1CC4H = 0x02;
+  T1CC4L = 0x70;
   //Set each channel to set-up, clear-down and compare mode
-  T1CCTL1 |= 0x1C;  //[---1 11--]
-  T1CCTL1 &= ~0x63;  //[--0- --00]
-  T1CCTL2 |= 0x1C;  //[---1 11--]
-  T1CCTL2 &= ~0x63;  //[-00- --00]
+  T1CCTL3 |= 0x1C;  //[---1 11--]
+  T1CCTL3 &= ~0xE3;  //[-00- --00]
+  T1CCTL4 |= 0x1C;  //[---1 11--]
+  T1CCTL4 &= ~0xE3;  //[-00- --00]
   
   //  //To Test Timer (5Hz)
   P0SEL &= ~0x01;
